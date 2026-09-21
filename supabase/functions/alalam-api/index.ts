@@ -8,6 +8,7 @@ const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_SECTIONS = new Set(["math_lab", "research", "school_trip", "reading_comprehension"]);
 const ALLOWED_ORIGINS = new Set([
   "https://alalam-alsaghir.vercel.app",
+  "https://rus1999rusia-rgb.github.io",
   "https://alalam-alsaghir.rus1999rusia.chatgpt.site",
   "http://localhost:3000",
   "http://localhost:4173",
