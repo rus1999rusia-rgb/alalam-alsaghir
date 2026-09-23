@@ -5,6 +5,9 @@ let submitSection=normalizeSection(submitParams.get("section"));
 let submitClass=Math.min(4,Math.max(1,Number(submitParams.get("class"))||1));
 const requestedAssignment=submitParams.get("assignment")||"";
 let submitData=null;
+let preparedSubmissionImage=null;
+let submissionImageTask=Promise.resolve();
+let submissionPreviewUrl="";
 
 function fillSubmissionOptions(){
   $("#sectionSelect").value=submitSection;
@@ -30,12 +33,24 @@ function updateSubmitContext(){
 async function submitStudentWork(event){
   event.preventDefault();const button=$("#submitButton");button.disabled=true;button.textContent="جارٍ الإرسال...";
   try{
-    const formData=new FormData(event.currentTarget);formData.set("section",submitSection);formData.set("class_id",String(submitClass));
+    await submissionImageTask;
+    const formData=new FormData(event.currentTarget);formData.set("section",submitSection);formData.set("class_id",String(submitClass));formData.delete("image");
+    if(preparedSubmissionImage)formData.append("image",preparedSubmissionImage,preparedSubmissionImage.name);
     const response=await fetch(ALALAM_API,{method:"POST",body:formData});const result=await response.json().catch(()=>({}));
     if(!response.ok)throw new Error(result.error||"تعذّر إرسال المشاركة");
     clearPublicCache();$("#submissionCard").classList.add("hidden");$("#successCard").classList.remove("hidden");$("#successMessage").textContent=result.message||"وصلت مشاركتك للمراجعة";$("#successBack").href=`/alalam-alsaghir/class/?section=${submitSection}&class=${submitClass}`;scrollTo({top:0,behavior:"smooth"});
   }catch(error){showToast(error.message,"error")}
   finally{button.disabled=false;button.textContent="إرسال للمراجعة"}
+}
+
+async function handleSubmissionImage(file){
+  const preview=$("#filePreview"),help=$("#studentImageHelp"),button=$("#submitButton");
+  preparedSubmissionImage=null;if(submissionPreviewUrl){URL.revokeObjectURL(submissionPreviewUrl);submissionPreviewUrl=""}
+  if(!file){preview.classList.add("hidden");help.textContent="سيتم تجهيز الصورة تلقائيًا قبل الإرسال";return}
+  button.disabled=true;help.textContent="جارٍ تجهيز الصورة...";
+  try{preparedSubmissionImage=await prepareImageFile(file);submissionPreviewUrl=URL.createObjectURL(preparedSubmissionImage);preview.src=submissionPreviewUrl;preview.classList.remove("hidden");help.textContent="الصورة جاهزة للإرسال"}
+  catch(error){$("#imageInput").value="";preview.classList.add("hidden");help.textContent="سيتم تجهيز الصورة تلقائيًا قبل الإرسال";showToast(error.message,"error");throw error}
+  finally{button.disabled=false}
 }
 
 async function loadSubmitPage(){
@@ -44,6 +59,6 @@ async function loadSubmitPage(){
 }
 
 $("#sectionSelect").addEventListener("change",updateAssignments);$("#classSelect").addEventListener("change",updateAssignments);$("#submissionForm").addEventListener("submit",submitStudentWork);
-$("#imageInput").addEventListener("change",event=>{const file=event.target.files?.[0],preview=$("#filePreview");if(!file){preview.classList.add("hidden");return}if(file.size>3*1024*1024){event.target.value="";preview.classList.add("hidden");showToast("حجم الصورة أكبر من 3 ميجابايت","error");return}preview.src=URL.createObjectURL(file);preview.classList.remove("hidden")});
+$("#imageInput").addEventListener("change",event=>{submissionImageTask=handleSubmissionImage(event.target.files?.[0]).catch(()=>null)});
 
 loadSubmitPage();

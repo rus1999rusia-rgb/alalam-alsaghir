@@ -47,6 +47,36 @@ async function loadPublicData(force=false){
 
 function clearPublicCache(){sessionStorage.removeItem("alalam_public_cache")}
 
+function canvasToImageBlob(canvas,quality){return new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(new Error("تعذّر تجهيز الصورة")),"image/jpeg",quality))}
+
+async function decodeImageFile(file){
+  if("createImageBitmap" in window){
+    try{const bitmap=await createImageBitmap(file,{imageOrientation:"from-image"});return{source:bitmap,width:bitmap.width,height:bitmap.height,close:()=>bitmap.close()}}catch{}
+  }
+  return await new Promise((resolve,reject)=>{const url=URL.createObjectURL(file),image=new Image();image.onload=()=>resolve({source:image,width:image.naturalWidth,height:image.naturalHeight,close:()=>URL.revokeObjectURL(url)});image.onerror=()=>{URL.revokeObjectURL(url);reject(new Error("تعذّر قراءة الصورة، اختاري صورة أخرى"))};image.src=url})
+}
+
+async function prepareImageFile(file){
+  if(!(file instanceof File)||!file.size)return null;
+  if(!["image/jpeg","image/png","image/webp"].includes(file.type))throw new Error("اختاري صورة بصيغة JPG أو PNG أو WebP");
+  const decoded=await decodeImageFile(file);
+  try{
+    const attempts=[{side:1800,quality:.84},{side:1500,quality:.78},{side:1280,quality:.72}];let blob=null;
+    for(const attempt of attempts){
+      const scale=Math.min(1,attempt.side/Math.max(decoded.width,decoded.height));
+      const width=Math.max(1,Math.round(decoded.width*scale)),height=Math.max(1,Math.round(decoded.height*scale));
+      const canvas=document.createElement("canvas");canvas.width=width;canvas.height=height;
+      const context=canvas.getContext("2d",{alpha:false});if(!context)throw new Error("تعذّر تجهيز الصورة");
+      context.fillStyle="#fff";context.fillRect(0,0,width,height);context.drawImage(decoded.source,0,0,width,height);
+      blob=await canvasToImageBlob(canvas,attempt.quality);canvas.width=1;canvas.height=1;
+      if(blob.size<=2.4*1024*1024)break;
+    }
+    if(!blob)throw new Error("تعذّر تجهيز الصورة");
+    const base=(file.name||"photo").replace(/\.[^.]+$/,"" ).replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,60)||"photo";
+    return new File([blob],`${base}.jpg`,{type:"image/jpeg",lastModified:Date.now()});
+  }finally{decoded.close()}
+}
+
 function applySiteSettings(data){
   const settings=data?.settings||{};
   $$("[data-school-name]").forEach(element=>element.textContent=settings.school_name||"مدرسة الطفولة المبكرة بابتدائية عسفان");

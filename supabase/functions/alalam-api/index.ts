@@ -3,7 +3,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const BUCKET = "alalam-submissions";
 const SESSION_HOURS = 8;
-const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_ADMIN_IMAGES = 8;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const ALLOWED_SECTIONS = new Set(["math_lab", "research", "school_trip", "reading_comprehension"]);
 const ALLOWED_ORIGINS = new Set([
@@ -64,7 +65,7 @@ function randomToken() {
   return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-async function rest(path: string, init: RequestInit = {}) {
+async function rest(path: string, init: RequestInit = {}, attempt = 0): Promise<any> {
   if (!SUPABASE_URL || !SECRET_KEY) throw new Error("إعدادات الخادم غير مكتملة");
   const headers = new Headers(init.headers);
   headers.set("apikey", SECRET_KEY);
@@ -72,6 +73,10 @@ async function rest(path: string, init: RequestInit = {}) {
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers });
   if (!response.ok) {
+    if (attempt < 1 && (response.status === 401 || response.status === 429 || response.status >= 500)) {
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      return await rest(path, init, attempt + 1);
+    }
     const message = await response.text();
     console.error("Database request failed", response.status, path, message);
     throw new Error("تعذّر تنفيذ الطلب الآن");
@@ -117,18 +122,29 @@ async function attachSignedImages(rows: Array<Record<string, unknown>>) {
   })));
 }
 
+async function attachSignedGalleries(rows: Array<Record<string, unknown>>) {
+  return await Promise.all(rows.map(async (row) => {
+    const paths = Array.isArray(row.image_paths) ? row.image_paths.filter((path): path is string => typeof path === "string" && path.length > 0) : [];
+    return {
+      ...row,
+      image_urls: (await Promise.all(paths.map((path) => signedImageUrl(path)))).filter(Boolean),
+      image_paths: undefined,
+    };
+  }));
+}
+
 async function publicFeed() {
   const [settingsRows, classes, assignments, submissions] = await Promise.all([
     rest("alalam_settings?select=key,value&key=neq.admin_pin_hash"),
     rest("alalam_classes?select=id,name,display_order,color&order=display_order.asc"),
-    rest("alalam_assignments?select=id,section,class_id,title,description,due_date,created_at&is_active=eq.true&order=created_at.desc"),
+    rest("alalam_assignments?select=id,section,class_id,title,description,due_date,created_at,image_paths&is_active=eq.true&order=created_at.desc"),
     rest("alalam_submissions?select=id,assignment_id,section,class_id,student_name,title,body_text,stars,featured,created_at,image_path&status=eq.approved&order=featured.desc,stars.desc,created_at.desc&limit=120"),
   ]);
   const settings = Object.fromEntries((settingsRows ?? []).map((row: { key: string; value: string }) => [row.key, row.value]));
   return {
     settings,
     classes,
-    assignments,
+    assignments: await attachSignedGalleries(assignments ?? []),
     submissions: await attachSignedImages(submissions ?? []),
   };
 }
@@ -178,7 +194,7 @@ async function adminFeed() {
   return {
     settings: Object.fromEntries((settingsRows ?? []).map((row: { key: string; value: string }) => [row.key, row.value])),
     classes,
-    assignments,
+    assignments: await attachSignedGalleries(assignments ?? []),
     submissions: await attachSignedImages(submissions ?? []),
   };
 }
@@ -219,11 +235,11 @@ async function rateLimit(req: Request) {
   });
 }
 
-async function uploadImage(file: File, classId: number) {
+async function uploadImage(file: File, folder: "pending" | "published", section: string, classId: number | null) {
   if (!ALLOWED_IMAGE_TYPES.has(file.type)) throw new Error("الصورة يجب أن تكون JPG أو PNG أو WebP");
-  if (file.size > MAX_IMAGE_BYTES) throw new Error("حجم الصورة يجب ألا يتجاوز 3 ميجابايت");
+  if (file.size > MAX_IMAGE_BYTES) throw new Error("تعذّر تجهيز الصورة، حاولي اختيار صورة أخرى");
   const extension = file.type === "image/png" ? "png" : file.type === "image/webp" ? "webp" : "jpg";
-  const path = `pending/class-${classId}/${crypto.randomUUID()}.${extension}`;
+  const path = `${folder}/${section}/class-${classId ?? "all"}/${crypto.randomUUID()}.${extension}`;
   await storage(`object/${BUCKET}/${path}`, {
     method: "POST",
     headers: { "Content-Type": file.type, "x-upsert": "false" },
@@ -232,9 +248,9 @@ async function uploadImage(file: File, classId: number) {
   return path;
 }
 
-async function submitWork(req: Request) {
+async function submitWork(req: Request, submittedForm?: FormData) {
   await rateLimit(req);
-  const form = await req.formData();
+  const form = submittedForm ?? await req.formData();
   const section = parseSection(form.get("section"));
   const classId = parseClassId(form.get("class_id"));
   const studentName = cleanText(form.get("student_name"), 60);
@@ -249,7 +265,7 @@ async function submitWork(req: Request) {
   if (assignmentId && !/^[0-9a-f-]{36}$/i.test(assignmentId)) throw new Error("الطلب المحدد غير صحيح");
   if (!bodyText && !(file instanceof File && file.size > 0)) throw new Error("أضيفي نصًا أو صورة للمشاركة");
 
-  const imagePath = file instanceof File && file.size > 0 ? await uploadImage(file, classId as number) : null;
+  const imagePath = file instanceof File && file.size > 0 ? await uploadImage(file, "pending", section, classId as number) : null;
   await rest("alalam_submissions", {
     method: "POST",
     headers: { Prefer: "return=minimal" },
@@ -287,6 +303,76 @@ async function saveAssignment(body: Record<string, unknown>) {
       method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(payload),
     });
   }
+}
+
+async function removeStoredImages(paths: string[]) {
+  const cleanPaths = paths.filter((path) => typeof path === "string" && path.length > 0);
+  if (!cleanPaths.length) return;
+  try {
+    await storage(`object/${BUCKET}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefixes: cleanPaths }),
+    });
+  } catch (error) {
+    console.error("Unable to remove stored images", error);
+  }
+}
+
+async function saveAssignmentWithImages(form: FormData) {
+  const id = cleanText(form.get("id"), 50);
+  if (id && !/^[0-9a-f-]{36}$/i.test(id)) throw new Error("بيانات المحتوى غير صحيحة");
+  const section = parseSection(form.get("section"));
+  const classId = parseClassId(form.get("class_id"), true);
+  const payload: Record<string, unknown> = {
+    section,
+    class_id: classId,
+    title: cleanText(form.get("title"), 140),
+    description: cleanText(form.get("description"), 3000),
+    due_date: cleanText(form.get("due_date"), 10) || null,
+    is_active: String(form.get("is_active")) === "true",
+    updated_at: new Date().toISOString(),
+  };
+  if (String(payload.title).length < 2) throw new Error("اكتبي عنوان الطلب أو النشاط");
+
+  const existingRows = id ? await rest(`alalam_assignments?select=image_paths&id=eq.${encodeURIComponent(id)}&limit=1`) : [];
+  if (id && !existingRows?.length) throw new Error("المحتوى المطلوب غير موجود");
+  const previousPaths = Array.isArray(existingRows?.[0]?.image_paths) ? existingRows[0].image_paths.filter((path: unknown) => typeof path === "string") : [];
+  const removeExisting = String(form.get("remove_images")) === "true";
+  const basePaths = removeExisting ? [] : previousPaths;
+  const files = form.getAll("images").filter((item): item is File => item instanceof File && item.size > 0);
+  if (files.length > MAX_ADMIN_IMAGES) throw new Error("يمكن إضافة ثماني صور في المرة الواحدة");
+  if (basePaths.length + files.length > 16) throw new Error("وصل هذا المحتوى إلى الحد الأعلى للصور؛ احذفي الصور الحالية ثم أضيفي الجديدة");
+
+  const uploadedPaths: string[] = [];
+  try {
+    for (const file of files) uploadedPaths.push(await uploadImage(file, "published", section, classId));
+    const imagePaths = [...basePaths, ...uploadedPaths];
+    payload.image_paths = imagePaths;
+    if (id) {
+      await rest(`alalam_assignments?id=eq.${encodeURIComponent(id)}`, {
+        method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify(payload),
+      });
+    } else {
+      await rest("alalam_assignments", {
+        method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(payload),
+      });
+    }
+  } catch (error) {
+    await removeStoredImages(uploadedPaths);
+    throw error;
+  }
+
+  if (removeExisting) await removeStoredImages(previousPaths);
+  return { ok: true, image_count: basePaths.length + uploadedPaths.length };
+}
+
+async function deleteAssignment(id: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("بيانات المحتوى غير صحيحة");
+  const rows = await rest(`alalam_assignments?select=image_paths&id=eq.${encodeURIComponent(id)}&limit=1`);
+  const paths = Array.isArray(rows?.[0]?.image_paths) ? rows[0].image_paths.filter((path: unknown) => typeof path === "string") : [];
+  await rest(`alalam_assignments?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", headers: { Prefer: "return=minimal" } });
+  await removeStoredImages(paths);
 }
 
 async function moderateSubmission(body: Record<string, unknown>) {
@@ -346,8 +432,13 @@ Deno.serve(async (req: Request) => {
   try {
     const contentType = req.headers.get("content-type") ?? "";
     if (contentType.includes("multipart/form-data")) {
-      const result = await submitWork(req);
-      return json(req, result, 201);
+      const form = await req.formData();
+      const action = cleanText(form.get("action"), 40);
+      if (action === "admin_save_assignment") {
+        if (!(await verifyAdmin(req))) return json(req, { error: "انتهت جلسة المشرفة، سجلي الدخول مرة أخرى" }, 401);
+        return json(req, await saveAssignmentWithImages(form), 201);
+      }
+      return json(req, await submitWork(req, form), 201);
     }
 
     const body = await req.json() as Record<string, unknown>;
@@ -363,10 +454,8 @@ Deno.serve(async (req: Request) => {
 
     if (action === "admin_feed") return json(req, await adminFeed());
     if (action === "save_assignment") await saveAssignment(body);
-    else if (action === "delete_assignment") {
-      const id = cleanText(body.id, 50);
-      await rest(`alalam_assignments?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", headers: { Prefer: "return=minimal" } });
-    } else if (action === "moderate_submission") await moderateSubmission(body);
+    else if (action === "delete_assignment") await deleteAssignment(cleanText(body.id, 50));
+    else if (action === "moderate_submission") await moderateSubmission(body);
     else if (action === "delete_submission") await deleteSubmission(cleanText(body.id, 50));
     else if (action === "update_class") await updateClass(body);
     else if (action === "update_settings") await updateSettings(body);
