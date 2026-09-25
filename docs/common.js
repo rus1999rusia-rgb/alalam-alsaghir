@@ -92,7 +92,17 @@ function initNavigation(){
   $$(`[data-nav]`).forEach(link=>link.classList.toggle("active",link.dataset.nav===current));
 }
 
+function initVisionIdentity(){
+  const footer=document.querySelector("footer");
+  if(!footer||document.querySelector(".vision-band"))return;
+  const band=document.createElement("aside");
+  band.className="vision-band";
+  band.setAttribute("aria-label","رؤية السعودية 2030");
+  band.innerHTML='<div class="container vision-inner"><img class="vision-logo" src="/alalam-alsaghir/vision-2030.jpg" alt="شعار رؤية السعودية 2030" loading="lazy"><div class="vision-copy"><strong>تعليم طموح لمستقبل مزدهر</strong><span>نلهم طالباتنا للتعلّم والإبداع والمشاركة</span></div></div>';
+  footer.before(band);
+}
+
 function setPageLoading(container){if(container)container.innerHTML='<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>'}
 function setPageError(container,retry){if(!container)return;container.innerHTML=emptyState("تعذّر تحميل المحتوى","تحققي من الإنترنت ثم أعيدي المحاولة.","↻");const button=document.createElement("button");button.className="btn btn-primary btn-sm retry-btn";button.type="button";button.textContent="إعادة المحاولة";button.addEventListener("click",retry);container.querySelector(".empty-state").append(button)}
 
-document.addEventListener("DOMContentLoaded",initNavigation);
+document.addEventListener("DOMContentLoaded",()=>{initNavigation();initVisionIdentity()});

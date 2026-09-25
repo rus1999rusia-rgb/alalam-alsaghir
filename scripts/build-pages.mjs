@@ -6,7 +6,7 @@ const output = new URL("../docs/", import.meta.url);
 const repository = process.env.GITHUB_REPOSITORY?.split("/")[1] || "alalam-alsaghir";
 const base = repository.endsWith(".github.io") ? "/" : `/${repository}/`;
 const pages = new Set(["math-lab", "research", "school-trip", "reading", "stars", "class", "submit", "admin"]);
-const assets = new Set(["styles.css", "kids-learning.svg", "common.js", "home.js", "section.js", "class.js", "submit.js", "stars.js", "admin.js"]);
+const assets = new Set(["styles.css", "kids-learning.svg", "vision-2030.jpg", "common.js", "home.js", "section.js", "class.js", "submit.js", "stars.js", "admin.js"]);
 
 function rewrite(content) {
   return content
